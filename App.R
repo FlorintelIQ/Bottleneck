@@ -397,7 +397,7 @@ server <- function(input, output, session) {
   login_error  <- reactiveVal(NULL)
   current_user <- reactiveVal(NULL)
   
-  # ✅ ROBUUST: sidebar echt verbergen + content full width als je NIET ingelogd bent
+  # verberg side bar wanneer niet ingelogd
   observe({
     invalidateLater(200, session)  # geeft AdminLTE tijd om DOM te renderen
     
@@ -491,7 +491,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # --- reactive: deliveries per kwartier voor gekozen dag ---
+  # --- reactive: deliveries per kwartier voor gekozen dag voor figuur ####
   daily_q15 <- reactive({
     req(rv$data, input$daily_date)
     req(all(c("date", "t_time", "deliveries") %in% names(rv$data)))
@@ -539,7 +539,7 @@ server <- function(input, output, session) {
     out
   })
   
-  # --- plotly figuur ---
+  # --- plotly figuur data ####
   output$deliveries_q15_plot <- plotly::renderPlotly({
     d <- daily_q15()
     
@@ -572,9 +572,9 @@ server <- function(input, output, session) {
       )
   })
   
-  # -------------------------
-  # Chatbot (dummy advies) — server state
-  # -------------------------
+  
+  # Chatbot (dummy advies) — server state ####
+  
   chat <- reactiveValues(messages = list(
     list(role = "Tiri", text = "Hoi ik ben Tiri! Ik kan advies geven op basis van je data. Wat wil je weten?")
   ))
