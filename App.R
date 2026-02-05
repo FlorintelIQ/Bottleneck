@@ -1,6 +1,5 @@
 # Mon Feb  2 15:24:12 2026 ------------------------------
 # App for display
-
 # app.R
 
 library(shiny)
@@ -53,7 +52,6 @@ ui <- dashboardPage(
   
   dashboardHeader(title = "Tiresias"),
   
-  # id laten staan (handig), maar we sturen zichtbaarheid via JS/CSS
   dashboardSidebar(
     sidebarMenu(
       menuItem("Dashboard", tabName = "dashboard", icon = icon("table")),
@@ -123,6 +121,66 @@ ui <- dashboardPage(
           font-size: 12px;
           margin-top: 6px;
         }
+
+        /* -------------------------
+           Floating chatbot (rechts-onder)
+           ------------------------- */
+        #chatbot-container {
+          position: fixed;
+          right: 20px;
+          bottom: 20px;
+          width: 340px;
+          z-index: 9999;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+          border-radius: 10px;
+          overflow: hidden;
+          background: #ffffff;
+          display: none; /* start hidden; toggle via button */
+        }
+        #chatbot-header {
+          background: #2e7d32;
+          color: white;
+          padding: 10px 12px;
+          font-weight: 600;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+        #chatbot-body {
+          padding: 10px 12px;
+        }
+        #chatbot-log {
+          height: 210px;
+          overflow-y: auto;
+          border: 1px solid #e5e5e5;
+          border-radius: 8px;
+          padding: 8px;
+          background: #fafafa;
+          margin-bottom: 10px;
+          font-size: 13px;
+          line-height: 1.35;
+        }
+        #chatbot-toggle {
+          position: fixed;
+          right: 20px;
+          bottom: 20px;
+          z-index: 10000;
+          border-radius: 999px;
+          padding: 10px 14px;
+          background: #2e7d32;
+          color: white;
+          border: none;
+          cursor: pointer;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+        }
+        #chatbot-close {
+          background: transparent;
+          border: 0;
+          color: white;
+          font-size: 18px;
+          cursor: pointer;
+          line-height: 1;
+        }
       "))
     ),
     
@@ -161,9 +219,10 @@ ui <- dashboardPage(
         fluidRow(
           column(
             width = 12,
-            div(style = "display:flex; justify-content: space-between; align-items:center; margin-bottom: 10px;",
-                div(class = "whoami", textOutput("whoami")),
-                actionButton("btn_logout", "Uitloggen", class = "btn btn-default")
+            div(
+              style = "display:flex; justify-content: space-between; align-items:center; margin-bottom: 10px;",
+              div(class = "whoami", textOutput("whoami")),
+              actionButton("btn_logout", "Uitloggen", class = "btn btn-default")
             )
           )
         ),
@@ -173,6 +232,7 @@ ui <- dashboardPage(
             tabName = "dashboard",
             tabBox(
               width = 12,
+              
               tabPanel(
                 title = "Dagelijkse data",
                 value = "daily_data",
@@ -184,7 +244,6 @@ ui <- dashboardPage(
                     status = "success",
                     solidHeader = TRUE,
                     
-                    # Calendar selectie (server vult later min/max of default)
                     dateInput(
                       inputId = "daily_date",
                       label   = "Kies datum",
@@ -202,7 +261,6 @@ ui <- dashboardPage(
                     status = "success",
                     solidHeader = TRUE,
                     
-                    # Plotly figuur (server komt later)
                     plotlyOutput(
                       outputId = "deliveries_q15_plot",
                       height   = "450px"
@@ -210,8 +268,9 @@ ui <- dashboardPage(
                   )
                 )
               ), # end tabPanel
+              
               tabPanel("Data tabel", DTOutput("data_table"))
-            )# end tabBox
+            ) # end tabBox
           ), # end dashboard
           
           tabItem(
@@ -259,7 +318,73 @@ ui <- dashboardPage(
               p("Florintel IQ aanvaardt geen aansprakelijkheid voor beslissingen die op basis van deze informatie worden genomen.")
             )
           )
-        )
+        ),
+        
+        # -------------------------
+        # Chatbot UI (alleen zichtbaar NA login, want binnen app_panel)
+        # -------------------------
+        tags$button(
+          id = "chatbot-toggle",
+          type = "button",
+          "Advies"
+        ),
+        
+        tags$div(
+          id = "chatbot-container",
+          tags$div(
+            id = "chatbot-header",
+            "Advies-assistent",
+            tags$button(
+              id = "chatbot-close",
+              type = "button",
+              HTML("&times;")
+            )
+          ),
+          tags$div(
+            id = "chatbot-body",
+            uiOutput("chatbot_log"),
+            fluidRow(
+              column(
+                width = 9,
+                textInput("chatbot_msg", NULL, placeholder = "Typ je vraag...", width = "100%")
+              ),
+              column(
+                width = 3,
+                actionButton("chatbot_send", "Send", width = "100%")
+              )
+            )
+          )
+        ),
+        
+        # JS open/close + Enter-to-send voor chatbot
+        tags$script(HTML("
+          document.addEventListener('DOMContentLoaded', function() {
+            var toggle = document.getElementById('chatbot-toggle');
+            var box = document.getElementById('chatbot-container');
+            var closeBtn = document.getElementById('chatbot-close');
+
+            if (toggle && box && closeBtn) {
+              toggle.addEventListener('click', function() {
+                box.style.display = 'block';
+                toggle.style.display = 'none';
+              });
+
+              closeBtn.addEventListener('click', function() {
+                box.style.display = 'none';
+                toggle.style.display = 'block';
+              });
+            }
+
+            // Enter-to-send
+            $(document).off('keypress.florintelChat');
+            $(document).on('keypress.florintelChat', '#chatbot_msg', function(e){
+              if(e.which === 13){
+                $('#chatbot_send').click();
+                e.preventDefault();
+              }
+            });
+          });
+        "))
       )
     )
   )
@@ -304,8 +429,10 @@ server <- function(input, output, session) {
   output$login_alert <- renderUI({
     msg <- login_error()
     if (is.null(msg)) return(NULL)
-    div(class = "callout callout-danger", style = "margin-top: 10px;",
-        tags$b("Inloggen mislukt: "), msg
+    div(
+      class = "callout callout-danger",
+      style = "margin-top: 10px;",
+      tags$b("Inloggen mislukt: "), msg
     )
   })
   
@@ -347,11 +474,7 @@ server <- function(input, output, session) {
     datatable(rv$data, options = list(scrollX = TRUE, dom = "tip"), editable = TRUE)
   })
   
-  # output$data_summary <- renderPrint({
-  #   req(logged_in())
-  #   summary(rv$data)
-  # })
-  
+  # ---- DateInput min/max dynamisch zetten op basis van rv$data ----
   observe({
     req(rv$data)
     req("date" %in% names(rv$data))
@@ -364,7 +487,7 @@ server <- function(input, output, session) {
       inputId = "daily_date",
       min = dmin,
       max = dmax
-      # value = dmax   # evt: standaard meest recente dag
+      # value = dmax
     )
   })
   
@@ -440,23 +563,58 @@ server <- function(input, output, session) {
           title = "Tijd (per 15 minuten)",
           tickformat = "%H:%M",
           range = list(
-            as.POSIXct(
-              paste(input$daily_date, "07:00"),
-              tz = "Europe/Amsterdam"
-            ),
-            as.POSIXct(
-              paste(input$daily_date, "12:00"),
-              tz = "Europe/Amsterdam"
-            )
+            as.POSIXct(paste(input$daily_date, "07:00"), tz = "Europe/Amsterdam"),
+            as.POSIXct(paste(input$daily_date, "12:00"), tz = "Europe/Amsterdam")
           )
         ),
-        yaxis = list(
-          title = "Aantal deliveries"
-        ),
+        yaxis = list(title = "Aantal deliveries"),
         margin = list(l = 60, r = 20, b = 60, t = 30)
       )
   })
   
+  # -------------------------
+  # Chatbot (dummy advies) — server state
+  # -------------------------
+  chat <- reactiveValues(messages = list(
+    list(role = "Tiri", text = "Hoi ik ben Tiri! Ik kan advies geven op basis van je data. Wat wil je weten?")
+  ))
+  
+  output$chatbot_log <- renderUI({
+    items <- lapply(chat$messages, function(m) {
+      if (m$role == "user") {
+        tags$div(style = "margin:6px 0; font-weight:600;", paste("Jij:", m$text))
+      } else {
+        tags$div(style = "margin:6px 0; color:#2e7d32;", paste("Assistent:", m$text))
+      }
+    })
+    tags$div(id = "chatbot-log", items)
+  })
+  
+  outputOptions(output, "chatbot_log", suspendWhenHidden = FALSE)
+  
+  observeEvent(input$chatbot_send, {
+    req(logged_in())
+    req(nzchar(input$chatbot_msg))
+    
+    user_msg <- input$chatbot_msg
+    
+    chat$messages <- append(chat$messages, list(list(role = "user", text = input$chatbot_msg)))
+    
+    reply <- paste0(
+      "Dank voor je vraag. Op basis van de huidige data zie ik dat:\n",
+      "- De deliveries zich concentreren tussen 07:00 en 12:00\n",
+      "- Pieken meestal samenhangen met vaste tijdslots\n\n",
+      "Tip: let vooral op afwijkingen t.o.v. dit patroon. ",
+      "Als een kwartier plots sterk afwijkt, kan dat duiden op vertragingen ",
+      "of operationele issues.\n\n",
+      "(Dit advies is voorlopig algemeen; straks wordt dit dynamisch.)"
+    )
+    
+    
+    chat$messages <- append(chat$messages, list(list(role = "assistant", text = reply)))
+    
+    updateTextInput(session, "chatbot_msg", value = "")
+  })
 }
 
 shinyApp(ui, server)
