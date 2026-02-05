@@ -320,9 +320,9 @@ ui <- dashboardPage(
           )
         ),
         
-        # -------------------------
-        # Chatbot UI (alleen zichtbaar NA login, want binnen app_panel)
-        # -------------------------
+        
+        # Chatbot UI (alleen zichtbaar NA login, want binnen app_panel) ####
+        
         tags$button(
           id = "chatbot-toggle",
           type = "button",
