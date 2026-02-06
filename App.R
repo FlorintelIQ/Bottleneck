@@ -37,6 +37,11 @@ data_path <- "data.rds"
 if (!file.exists(data_path)) stop("Bestand niet gevonden: ", data_path)
 initial_data <- readRDS(data_path)
 
+# ---- MODEL ####
+mod1_path <- "mod1.Rdata"
+if (!file.exists(mod1_path)) stop("Bestand niet gevonden: ", mod1_path)
+mod1fit <- get(load(mod1_path))
+
 # Normalize types (prevents “no data after filter”)
 stopifnot(is.data.frame(initial_data))
 
@@ -63,7 +68,7 @@ ui <- dashboardPage(
   dashboardSidebar(
     sidebarMenu(
       menuItem("Dashboard", tabName = "dashboard", icon = icon("table")),
-      menuItem("Invoer & Predictie", tabName = "predict", icon = icon("chart-line")),
+      menuItem("Planner", tabName = "rush", icon = icon("clock")),
       menuItem("Over", tabName = "about", icon = icon("info-circle"))
     )
   ),
@@ -145,6 +150,194 @@ server <- function(input, output, session) {
   current_user <- reactiveVal(NULL)
   
   rv <- reactiveValues(data = initial_data)
+  
+
+  # RUSH PLANNER (server logic -> predict_df in gewenst format) ####
+  # Vereist UI inputs/outputs:
+  #  inputs:  rush_date, rush_reset, rush_fill_1, rush_make_features
+  #  outputs: rush_table, rush_summary, predict_input_preview
+  
+  rv_rush <- reactiveValues(
+    rush_df = NULL,
+    predict_df = NULL
+  )
+  
+  # 20 slots: 07:00–11:45 (t = 0..19)
+  make_rush_grid <- function(date, tz = "Europe/Amsterdam") {
+    start <- as.POSIXct(paste(as.Date(date), "07:00:00"), tz = tz)
+    end   <- as.POSIXct(paste(as.Date(date), "12:00:00"), tz = tz)
+    
+    ts <- seq(from = start, to = end, by = "15 min")
+    ts <- ts[ts < end]  # <-- cruciaal: precies 20 rijen (stop op 11:45)
+    
+    data.frame(
+      datetime = ts,
+      time     = format(ts, "%H:%M"),
+      rush     = 0L,
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  # JOUW gewenste newdata format
+  gen_newdata <- function(rush, day, val = 0, mom = 0, xmas = 0,
+                          weekday = c("Mon","Tue","Wed","Thu","Fri","Sat","Sun"),
+                          tz = "Europe/Amsterdam") {
+    
+    day <- as.Date(day)
+    
+    if (length(rush) != 20) {
+      stop("rush moet lengte 20 hebben (t=0..19, 07:00–11:45).")
+    }
+    
+    doy <- as.integer(strftime(day, format = "%j", tz = tz))
+    wd  <- strftime(day, format = "%a", tz = tz)  # Mon/Tue/...
+    
+    newdata <- data.frame(
+      t            = 0:19,
+      rush         = as.integer(rush),
+      weekday      = wd,
+      #doy          = doy,
+      seasonality1 = sin(2 * pi * doy / 365),
+      seasonality2 = cos(2 * pi * doy / 365),
+      val_window   = val,
+      mom_window   = mom,
+      xmas_window  = xmas,
+      stringsAsFactors = FALSE
+    )
+    
+    newdata
+  }
+  
+  # Init bij dagselectie
+  observeEvent(input$rush_date, {
+    req(logged_in())
+    rv_rush$rush_df <- make_rush_grid(input$rush_date)
+    rv_rush$predict_df <- NULL
+  }, ignoreInit = FALSE)
+  
+  # Reset / alles 1
+  observeEvent(input$rush_reset, {
+    req(logged_in(), rv_rush$rush_df)
+    rv_rush$rush_df$rush <- 0L
+    rv_rush$predict_df <- NULL
+  })
+  
+  observeEvent(input$rush_fill_1, {
+    req(logged_in(), rv_rush$rush_df)
+    rv_rush$rush_df$rush <- 1L
+    rv_rush$predict_df <- NULL
+  })
+  
+  # Rush tabel (alleen rush kolom editbaar)
+  output$rush_table <- renderDT({
+    req(logged_in(), rv_rush$rush_df)
+    
+    datatable(
+      rv_rush$rush_df[,2:3],
+      rownames = FALSE,
+      editable = list(
+        target = "cell",
+        disable = list(columns = c(0)),
+        options = list(
+          list(
+            column = 2,
+            editor = "select",
+            options = list(c(0, 1))
+          )
+        )
+      ),
+      options = list(dom = "tip", ordering = FALSE)
+    )
+  })
+  
+  output$predict_input_preview <- renderDT({
+    req(logged_in(), rv_rush$predict_df)
+    
+    datatable(
+      rv_rush$predict_df,
+      rownames = FALSE,
+      options  = list(pageLength = 25, scrollX = TRUE, dom = "tip")
+    )
+  })
+  
+  # Forceer 0/1 bij edits
+  observeEvent(input$rush_table_cell_edit, {
+    req(logged_in(), rv_rush$rush_df)
+    info <- input$rush_table_cell_edit
+    
+    i <- info$row
+    j <- info$col + 1  # DT col is 0-based
+    
+    # kolommen: 1=datetime, 2=time, 3=rush
+    if (j != 3) return()
+    
+    v <- suppressWarnings(as.integer(info$value))
+    if (is.na(v)) v <- 0L
+    v <- ifelse(v >= 1, 1L, 0L)
+    
+    rv_rush$rush_df[i, j] <- v
+    rv_rush$predict_df <- NULL
+  })
+  
+ 
+  
+  # Maak predict data in jouw format
+  observeEvent(input$rush_make_features, {
+    req(logged_in(), rv_rush$rush_df, input$rush_date)
+    
+    rush_vec <- as.integer(rv_rush$rush_df$rush)
+    if (length(rush_vec) != 20) {
+      showNotification("Rush-profiel moet 20 slots hebben (07:00–11:45).", type = "error")
+      return()
+    }
+    
+    # Weekday-levels veilig maken op basis van je bestaande data (als aanwezig)
+    # Als rv$data geen weekday kolom heeft, gebruiken we standaard Mon..Sun
+    #weekday_levels <- c("Mon","Tue","Wed","Thu","Fri","Sat","Sun")
+    #if (!is.null(rv$data) && "weekday" %in% names(rv$data) && is.factor(rv$data$weekday)) {
+    #  weekday_levels <- levels(rv$data$weekday)
+    #}
+    
+    rv_rush$predict_df <- gen_newdata(
+      rush = rush_vec,
+      day  = input$rush_date,
+      val  = 0,
+      mom  = 0,
+      xmas = 0,
+      weekday = weekday
+    )
+    
+    # 2) voorspel (werkt voor glm(poisson) en randomForest; fallback voor andere modellen)
+    yhat <- tryCatch({
+      if (inherits(mod1fit, "glm")) {
+        as.numeric(predict(rf, newdata = rv_rush$predict_df, type = "response"))
+      } else if (inherits(mod1fit, "randomForest")) {
+        as.numeric(predict(mod1fit, newdata = rv_rush$predict_df))
+      } else {
+        as.numeric(predict(mod1fit, newdata = rv_rush$predict_df))
+      }
+    }, error = function(e) {
+      showNotification(paste("Predict fout:", e$message), type = "error", duration = 8)
+      return(NULL)
+    })
+    
+    req(!is.null(yhat))
+    if (length(yhat) != nrow(rv_rush$predict_df)) {
+      showNotification("Predict output lengte klopt niet met newdata.", type = "error")
+      return()
+    }
+    
+    # 3) zet voorspelling in dezelfde tabel die je al previewt
+    rv_rush$predict_df$pred_deliveries <- yhat
+    
+    # (optioneel) afronden / clamp
+    # newdata$pred_deliveries <- pmax(0, newdata$pred_deliveries)
+    
+    #rv_rush$predict_df <- newdata
+    rv_rush$predict_df
+  })# end observe event rush make features
+  
+  
   
   # --- Chat open/close state for conditionalPanel (0/1) ---
   chatbot_open <- reactiveVal(0)
@@ -229,13 +422,40 @@ server <- function(input, output, session) {
           ),
           
           tabItem(
-            tabName = "predict",
-            box(
-              width = 12,
-              title = "Predictie",
-              status = "primary",
-              solidHeader = TRUE,
-              p("Predictie-tab kan hier later worden ingevuld.")
+            tabName = "rush",
+            
+            fluidRow(
+              box(
+                width = 4,
+                title = "Dag + rush-profiel",
+                status = "success",
+                solidHeader = TRUE,
+                
+                dateInput("rush_date", "Dag", value = Sys.Date(), format = "yyyy-mm-dd"),
+                tags$div(style="display:flex; gap:8px; flex-wrap:wrap;",
+                         actionButton("rush_reset", "Reset (alles 0)", icon = icon("rotate-left")),
+                         actionButton("rush_fill_1", "Alles 1", icon = icon("check")),
+                         actionButton("rush_make_features", "Maak voorspelling", icon = icon("wand-magic-sparkles"))
+                ),
+                tags$hr()
+              ),
+              
+              box(
+                width = 8,
+                title = "07:00–12:00 (per 15 min) — zet rush op 0/1",
+                status = "success",
+                solidHeader = TRUE,
+                DTOutput("rush_table")
+              )
+            ),
+            fluidRow(
+              box(
+                width = 12,
+                title = "Voorspelde deliveries (mod1)",
+                status = "info",
+                solidHeader = TRUE,
+                DTOutput("predict_input_preview")
+              )
             )
           ),
           
