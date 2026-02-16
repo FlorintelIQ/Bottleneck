@@ -809,7 +809,7 @@ server <- function(input, output, session) {
     df <- rv_rush$predict_df
     keep <- intersect(c("t", "rush", "pred_deliveries", "lower_ci", "upper_ci"), names(df))
     out <- df[, keep, drop = FALSE]
-    list(ok = TRUE, n = nrow(out), preview = head(out, 10))
+    list(ok = TRUE, n = nrow(out), preview = head(out, 20))
   }
   
   llm <- chat_openai(
