@@ -1,23 +1,23 @@
 # app.R
 # Tiresias (Florintel IQ) — Shiny dashboard with login + DT + Plotly + floating ellmer chatbot
-# Fixes included:
-# - jsonlite REMOVED (prevents validate() namespace conflict)
-# - shiny::validate() + shiny::need() used explicitly (safe)
-# - ellmer tools registered via llm$register_tool()
-# - rush prediction bug: predict(rf, ...) -> predict(mod1fit, ...)
-# - weekday object not found -> weekday_levels
+# Includes:
+# - Login (credentials via FLORENTIL_CREDENTIALS)
+# - Dashboard: daily plotly line (deliveries per 15 min)
+# - Planner (rush): create predict_df + GLM Poisson prediction with 95% CI (lower_ci/upper_ci)
+# - Planner outputs: DT table + Plotly chart (rush bars on y2 + prediction line + CI ribbon)
+# - Floating ellmer chatbot with tools (register_tool)
+# Notes:
+# - jsonlite removed (avoids validate() namespace conflicts)
+# - shiny::validate()/shiny::need() used explicitly
 
 library(shiny)
 library(shinydashboard)
 library(DT)
 library(shinyjs)
 library(plotly)
-
-# Ellmer chatbot
 library(ellmer)
 
 `%||%` <- function(a, b) if (!is.null(a)) a else b
-
 options(shiny.sanitize.errors = FALSE)
 
 # ---- LOGIN CREDENTIALS ----
@@ -43,14 +43,9 @@ names(VALID_PASSES) <- VALID_USERS
 data_path <- "data.rds"
 if (!file.exists(data_path)) stop("Bestand niet gevonden: ", data_path)
 initial_data <- readRDS(data_path)
-
-# ---- MODEL ----
-mod1_path <- "mod1.Rdata"
-if (!file.exists(mod1_path)) stop("Bestand niet gevonden: ", mod1_path)
-mod1fit <- get(load(mod1_path))
-
 stopifnot(is.data.frame(initial_data))
 
+# Normalize types
 if ("date" %in% names(initial_data)) {
   initial_data$date <- as.Date(initial_data$date)
 }
@@ -66,6 +61,11 @@ default_date <- if ("date" %in% names(initial_data) && any(!is.na(initial_data$d
 } else {
   Sys.Date()
 }
+
+# ---- MODEL ----
+mod1_path <- "mod2.Rdata"
+if (!file.exists(mod1_path)) stop("Bestand niet gevonden: ", mod1_path)
+mod1fit <- get(load(mod1_path))
 
 # ---- UI ----
 ui <- dashboardPage(
@@ -170,7 +170,7 @@ server <- function(input, output, session) {
     end   <- as.POSIXct(paste(as.Date(date), "12:00:00"), tz = tz)
     
     ts <- seq(from = start, to = end, by = "15 min")
-    ts <- ts[ts < end]  # exactly 20 rows
+    ts <- ts[ts < end]  # 20 rows: 07:00..11:45
     
     data.frame(
       datetime = ts,
@@ -185,10 +185,7 @@ server <- function(input, output, session) {
                           tz = "Europe/Amsterdam") {
     
     day <- as.Date(day)
-    
-    if (length(rush) != 20) {
-      stop("rush moet lengte 20 hebben (t=0..19, 07:00–11:45).")
-    }
+    if (length(rush) != 20) stop("rush moet lengte 20 hebben (t=0..19, 07:00–11:45).")
     
     doy <- as.integer(strftime(day, format = "%j", tz = tz))
     wd  <- strftime(day, format = "%a", tz = tz)
@@ -245,24 +242,13 @@ server <- function(input, output, session) {
     )
   })
   
-  output$predict_input_preview <- renderDT({
-    req(logged_in(), rv_rush$predict_df)
-    
-    datatable(
-      rv_rush$predict_df,
-      rownames = FALSE,
-      options  = list(pageLength = 25, scrollX = TRUE, dom = "tip")
-    )
-  })
-  
   observeEvent(input$rush_table_cell_edit, {
     req(logged_in(), rv_rush$rush_df)
     info <- input$rush_table_cell_edit
     
     i <- info$row
-    j <- info$col + 1  # DT is 0-based
-    
-    if (j != 3) return()  # only rush col
+    j <- info$col + 1 # DT 0-based
+    if (j != 3) return()
     
     v <- suppressWarnings(as.integer(info$value))
     if (is.na(v)) v <- 0L
@@ -295,31 +281,143 @@ server <- function(input, output, session) {
       weekday = weekday_levels
     )
     
-    yhat <- tryCatch({
+    # ---- PREDICT + (GLM) 95% CI ----
+    tryCatch({
+      
       if (inherits(mod1fit, "glm")) {
-        as.numeric(predict(mod1fit, newdata = rv_rush$predict_df, type = "response"))
+        
+        # GLM Poisson: link-scale prediction with SE
+        pred <- predict(
+          mod1fit,
+          newdata = rv_rush$predict_df,
+          type = "link",
+          se.fit = TRUE
+        )
+        
+        fit_link <- as.numeric(pred$fit)
+        se_link  <- as.numeric(pred$se.fit)
+        
+        rv_rush$predict_df$pred_deliveries <- exp(fit_link)
+        rv_rush$predict_df$lower_ci <- exp(fit_link - 1.96 * se_link)
+        rv_rush$predict_df$upper_ci <- exp(fit_link + 1.96 * se_link)
+        
       } else if (inherits(mod1fit, "randomForest")) {
-        as.numeric(predict(mod1fit, newdata = rv_rush$predict_df))
+        
+        yhat <- as.numeric(predict(mod1fit, newdata = rv_rush$predict_df))
+        rv_rush$predict_df$pred_deliveries <- yhat
+        rv_rush$predict_df$lower_ci <- NA_real_
+        rv_rush$predict_df$upper_ci <- NA_real_
+        
       } else {
-        as.numeric(predict(mod1fit, newdata = rv_rush$predict_df))
+        
+        yhat <- as.numeric(predict(mod1fit, newdata = rv_rush$predict_df))
+        rv_rush$predict_df$pred_deliveries <- yhat
+        rv_rush$predict_df$lower_ci <- NA_real_
+        rv_rush$predict_df$upper_ci <- NA_real_
       }
+      
     }, error = function(e) {
       showNotification(paste("Predict fout:", e$message), type = "error", duration = 8)
+      rv_rush$predict_df <- NULL
       return(NULL)
     })
     
-    req(!is.null(yhat))
-    if (length(yhat) != nrow(rv_rush$predict_df)) {
-      showNotification("Predict output lengte klopt niet met newdata.", type = "error")
-      return()
-    }
-    
-    rv_rush$predict_df$pred_deliveries <- yhat
+    req(!is.null(rv_rush$predict_df))
+    req("pred_deliveries" %in% names(rv_rush$predict_df))
     rv_rush$predict_df
   })
   
+  # output$predict_input_preview <- renderDT({
+  #   req(logged_in(), rv_rush$predict_df)
+  #   datatable(
+  #     rv_rush$predict_df,
+  #     rownames = FALSE,
+  #     options  = list(pageLength = 25, scrollX = TRUE, dom = "tip")
+  #   )
+  # })
+  # 
+  # ---- Plotly: rush input bars + prediction line + CI ribbon ----
+  output$rush_pred_plot <- renderPlotly({
+    req(logged_in())
+    req(rv_rush$predict_df)
+    
+    df <- rv_rush$predict_df
+    req(all(c("t", "rush", "pred_deliveries") %in% names(df)))
+    
+    df$t <- as.integer(df$t)
+    df$rush <- as.integer(df$rush)
+    df$pred_deliveries <- as.numeric(df$pred_deliveries)
+    
+    has_ci <- all(c("lower_ci", "upper_ci") %in% names(df)) &&
+      any(is.finite(df$lower_ci)) && any(is.finite(df$upper_ci))
+    
+    df <- df[order(df$t), ]
+    shiny::validate(shiny::need(nrow(df) > 0, "Nog geen voorspelling. Klik eerst op 'Maak voorspelling'."))
+    
+    p <- plot_ly(df, x = ~t)
+    
+    # 1) Input rush (0/1) as bars on y2
+    # p <- p %>%
+    #   add_bars(
+    #     y = ~rush,
+    #     name = "Rush (input 0/1)",
+    #     yaxis = "y2",
+    #     opacity = 0.35,
+    #     hoverinfo = "text",
+    #     text = ~paste0("t = ", t, "<br>rush = ", rush)
+    #   )
+    
+    # 2) CI ribbon (if available)
+    if (has_ci) {
+      df$lower_ci <- as.numeric(df$lower_ci)
+      df$upper_ci <- as.numeric(df$upper_ci)
+      
+      p <- p %>%
+        add_ribbons(
+          ymin = ~lower_ci,
+          ymax = ~upper_ci,
+          name = "95% CI (GLM)",
+          hoverinfo = "skip"
+        )
+    }
+    
+    # 3) Point prediction line
+    p <- p %>%
+      add_lines(
+        y = ~pred_deliveries,
+        name = "Puntvoorspelling",
+        mode = "lines+markers",
+        hoverinfo = "text",
+        text = ~paste0(
+          "t = ", t,
+          "<br>pred = ", round(pred_deliveries, 2),
+          if (has_ci) paste0("<br>95% CI: [", round(lower_ci, 2), ", ", round(upper_ci, 2), "]") else ""
+        )
+      )
+    
+    p %>%
+      layout(
+        #barmode = "overlay",
+        xaxis = list(
+          title = "Kwartier index (t = 0..19)",
+          tickmode = "linear",
+          dtick = 1
+        ),
+        yaxis = list(title = "Voorspelde deliveries"),
+        # yaxis2 = list(
+        #   title = "Rush (0/1)",
+        #   overlaying = "y",
+        #   side = "right",
+        #   range = c(-0.05, 1.05),
+        #   showgrid = FALSE
+        # ),
+        margin = list(l = 60, r = 60, b = 60, t = 30),
+        legend = list(orientation = "h", x = 0, y = -0.15)
+      )
+  })
+  
   # =============================================================================
-  # Chat open/close state
+  # CHAT open/close state
   # =============================================================================
   chatbot_open <- reactiveVal(0)
   output$chatbot_open <- renderText(chatbot_open())
@@ -404,6 +502,7 @@ server <- function(input, output, session) {
           
           tabItem(
             tabName = "rush",
+            
             fluidRow(
               box(
                 width = 4,
@@ -428,13 +527,24 @@ server <- function(input, output, session) {
                 DTOutput("rush_table")
               )
             ),
+            
+            # fluidRow(
+            #   box(
+            #     width = 12,
+            #     title = "Voorspelde deliveries (mod1) — tabel",
+            #     status = "info",
+            #     solidHeader = TRUE,
+            #     DTOutput("predict_input_preview")
+            #   )
+            # ),
+            
             fluidRow(
               box(
                 width = 12,
-                title = "Voorspelde deliveries (mod1)",
-                status = "info",
+                title = "Voorspelde deliveries (mod1) — grafiek (incl. CI + rush input)",
+                status = "success",
                 solidHeader = TRUE,
-                DTOutput("predict_input_preview")
+                plotlyOutput("rush_pred_plot", height = "380px")
               )
             )
           ),
@@ -546,30 +656,30 @@ server <- function(input, output, session) {
     paste("Ingelogd als:", current_user() %||% "")
   })
   
-  # ---- DT table ----
+  # =============================================================================
+  # DATA TABLE + DAILY PLOT
+  # =============================================================================
   output$data_table <- renderDT({
     req(logged_in())
-    datatable(rv$data, options = list(scrollX = TRUE, dom = "tip"), editable = TRUE)
+    datatable(
+      rv$data,
+      options = list(scrollX = TRUE, dom = "ftip"),
+      editable = TRUE
+    )
   })
   
   # Update date input bounds after login
   observe({
-    req(logged_in())
-    req(rv$data)
+    req(logged_in(), rv$data)
     req("date" %in% names(rv$data))
     
     dmin <- min(rv$data$date, na.rm = TRUE)
     dmax <- max(rv$data$date, na.rm = TRUE)
-    
     updateDateInput(session, "daily_date", min = dmin, max = dmax, value = dmax)
   })
   
-  # =============================================================================
-  # DAILY AGGREGATION
-  # =============================================================================
   daily_q15 <- reactive({
-    req(logged_in())
-    req(rv$data, input$daily_date)
+    req(logged_in(), rv$data, input$daily_date)
     req(all(c("date", "t_time", "deliveries") %in% names(rv$data)))
     
     x <- rv$data
@@ -600,20 +710,14 @@ server <- function(input, output, session) {
     out <- merge(data.frame(datetime = full_time), agg, by = "datetime", all.x = TRUE)
     out$deliveries[is.na(out$deliveries)] <- 0
     
-    # ensure correct types
     out$datetime <- as.POSIXct(out$datetime, tz = "Europe/Amsterdam")
     out$deliveries <- as.numeric(out$deliveries)
-    
     out
   })
   
-  # =============================================================================
-  # PLOTLY
-  # =============================================================================
   output$deliveries_q15_plot <- renderPlotly({
     req(logged_in())
     d <- daily_q15()
-    
     shiny::validate(shiny::need(nrow(d) > 0, "Geen data voor deze datum."))
     
     plot_ly(
@@ -642,10 +746,11 @@ server <- function(input, output, session) {
   # =============================================================================
   # CHATBOT (ELLMEER) — tools + register_tool
   # =============================================================================
-  
   chat <- reactiveValues(messages = list(
-    list(role = "assistant",
-         text = "Hoi, ik ben Fleur (data-assistent). Stel je vraag. Als ik iets uit de data moet halen, zoek ik het eerst op.")
+    list(
+      role = "assistant",
+      text = "Hoi, ik ben Tiri (data-assistent). Stel je vraag. Als ik iets uit de data moet halen, zoek ik het eerst op."
+    )
   ))
   
   tool_daily_summary <- function(date) {
@@ -702,17 +807,15 @@ server <- function(input, output, session) {
       return(list(ok = TRUE, message = "Nog geen rush-voorspelling gemaakt. Klik eerst op 'Maak voorspelling'."))
     }
     df <- rv_rush$predict_df
-    
-    keep <- intersect(c("t", "rush", "pred_deliveries"), names(df))
+    keep <- intersect(c("t", "rush", "pred_deliveries", "lower_ci", "upper_ci"), names(df))
     out <- df[, keep, drop = FALSE]
-    
     list(ok = TRUE, n = nrow(out), preview = head(out, 10))
   }
   
   llm <- chat_openai(
     model = "gpt-4.1-mini",
     system_prompt = paste(
-      "Je bent Fleur, een data-assistent in een R Shiny dashboard voor deliveries.",
+      "Je bent Tiri, een data-assistent in een R Shiny dashboard voor deliveries.",
       "Regels:",
       "1) Je mag NOOIT data/waarden verzinnen.",
       "2) Als een vraag gaat over concrete cijfers of patronen op een datum: gebruik daily_summary(date).",
