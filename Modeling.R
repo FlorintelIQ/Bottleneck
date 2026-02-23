@@ -42,27 +42,27 @@ rmse_pois
 mae_pois
 
 
-gen_newdata <- function(doy, day = "Mon", val = 0, mom = 0, xmas = 0,
-                        seed = NULL) {
+gen_newdata_from_date <- function(date, val = 0, mom = 0, xmas = 0, seed = NULL) {
   
-  if (length(doy) != 1) stop("`doy` must be a single value.")
-  if (length(day) != 1) stop("`day` must be a single weekday label.")
+  # date kan Date zijn of "YYYY-MM-DD" string
+  date <- as.Date(date)
+  if (is.na(date)) stop("`date` could not be parsed as Date.")
   
   if (!is.null(seed)) set.seed(seed)
   
-  t <- 0:19
-  day <- as.character(day)
+  doy <- as.integer(strftime(date, format = "%j"))  # 1..366
+  day <- strftime(date, format = "%a")              # "Mon", "Tue", ...
   
-  # --- helper: maak een piekvenster met drift + jitter ---
+  t <- 0:19
+  
   make_peak <- function(base_start, base_len,
                         drift_amp = 2, jitter_sd = 1, len_jitter = 1) {
-    # drift op basis van doy: schuift door het jaar heen wat eerder/later
+    
     drift <- round(drift_amp * sin(2 * pi * doy / 365))
     
     start <- base_start + drift + round(rnorm(1, 0, jitter_sd))
     len   <- base_len   + sample(seq(-len_jitter, len_jitter), 1)
     
-    # clamp zodat het binnen 0..19 blijft
     start <- max(0, min(19, start))
     len   <- max(1, len)
     end   <- min(19, start + len)
@@ -70,28 +70,24 @@ gen_newdata <- function(doy, day = "Mon", val = 0, mom = 0, xmas = 0,
     list(start = start, end = end)
   }
   
-  # --- dagtypes: 2 pieken op ma/wo/vr ---
   two_peak_days <- c("Mon", "Wed", "Fri")
   is_two_peaks <- day %in% two_peak_days
   
-  # basispatronen (kwartier-index 0..19)
-  # pas dit gerust aan aan jouw verhaal
   if (is_two_peaks) {
-    # ochtend + middag piek
-    p1 <- make_peak(base_start = 3,  base_len = 3, drift_amp = 2, jitter_sd = 1)
+    p1 <- make_peak(base_start = 2,  base_len = 3, drift_amp = 2, jitter_sd = 1)
     p2 <- make_peak(base_start = 11, base_len = 3, drift_amp = 2, jitter_sd = 1)
     rush <- as.integer((t >= p1$start & t <= p1$end) | (t >= p2$start & t <= p2$end))
   } else {
-    # 1 piek (rond midden van dag)
     p1 <- make_peak(base_start = 6, base_len = 4, drift_amp = 2, jitter_sd = 1)
     rush <- as.integer(t >= p1$start & t <= p1$end)
   }
   
   newdata <- data.frame(
+    date         = date,  # handig om mee te nemen
     t            = t,
     rush         = rush,
     weekday      = factor(day, levels = c("Mon","Tue","Wed","Thu","Fri","Sat","Sun")),
-    doy          = as.integer(doy),
+    doy          = doy,
     seasonality1 = sin(2 * pi * doy / 365),
     seasonality2 = cos(2 * pi * doy / 365),
     val_window   = as.integer(val),
@@ -99,10 +95,10 @@ gen_newdata <- function(doy, day = "Mon", val = 0, mom = 0, xmas = 0,
     xmas_window  = as.integer(xmas)
   )
   
-  return(newdata)
+  newdata
 }
 
-newdata <- gen_newdata(doy = 2, day = 'Wed', val = 1)
+newdata <- gen_newdata_from_date('2026-02-22')
 
 # #confidence interval
 pred <- predict(fit_poisson, newdata, type = "link", se.fit = TRUE)
