@@ -775,7 +775,7 @@ server <- function(input, output, session) {
       "2) Als een vraag gaat over concrete cijfers of patronen op een datum: gebruik daily_summary(date).",
       "3) Als een vraag gaat over rush-voorspelling: gebruik rush_prediction().",
       "4) Vat tool-resultaten kort samen met exacte waarden. Als tool geen data heeft, zeg wat de gebruiker moet klikken/doen.",
-      "5) als er gevraagd wordt naar voorspellingen, geef dan geen t variabele waarde, maar altijd de tijden."
+      "5) als er gevraagd wordt naar rush-voorspellingen, geef dan geen t variabele waarde, maar altijd de tijden. Bij t = 0 is het 07:00. Bij t = 19 is het 12:00. Elke t staat voor 15 minuten."
     )
   )
   
